@@ -95,15 +95,53 @@ with st.sidebar:
         st.warning("Low % is greater than High % — swap them or the report will come back empty.")
 
     st.header("3. Filters")
-    dept = st.text_input("Department", value="ALL", help="e.g. BCA, MCA, or ALL")
-    include_soft_skill = st.checkbox("Include Soft Skill", value=True)
-    include_subjects = st.text_input(
-        "Include only these subjects (comma-separated)", value="",
-        help="Whitelist — leave blank to keep all subjects.",
+
+    # Everything below is populated straight from whatever file you just
+    # uploaded — department codes AND subject names — so this same app
+    # works unmodified for BCA, MCA, or any other department/program: it
+    # never hardcodes a department or subject list, it reads them fresh
+    # from your file every time.
+    G_preview, C_preview = None, None
+    if raw_file is not None:
+        try:
+            preview_path = os.path.join(WORKDIR, "_preview.xlsx")
+            with open(preview_path, "wb") as f:
+                f.write(raw_file.getbuffer())
+            G_preview, C_preview = vp.load_raw(preview_path)
+        except Exception:
+            pass  # fall back to empty dropdowns — the real error surfaces clearly on Run
+
+    available_depts = ["ALL"]
+    if G_preview:
+        available_depts += sorted({r["_dept"] for r in G_preview if r.get("_dept")})
+    dept = st.selectbox(
+        "Department", options=available_depts, index=0,
+        help="Populated from the uploaded file once you add it above. 'ALL' keeps every department.",
     )
-    exclude_subjects = st.text_input(
-        "Exclude these subjects (comma-separated)", value="",
-        help="Blacklist — applied after the whitelist above.",
+
+    include_soft_skill = st.checkbox("Include Soft Skill", value=True)
+
+    # Subject lists narrow to the selected department automatically, so
+    # you're only ever picking from subjects that actually exist there.
+    available_subjects = []
+    if G_preview:
+        subj_col = C_preview["subject"]
+        available_subjects = sorted({
+            r[subj_col] for r in G_preview
+            if r.get(subj_col) and (dept == "ALL" or r.get("_dept") == dept)
+        })
+
+    include_selected = st.multiselect(
+        "Include only these subjects (whitelist)",
+        options=available_subjects, default=[], accept_new_options=True,
+        help="Pick from the dropdown, or type a name and press Enter to add it manually "
+             "(comma-separated text works too). Leave empty to keep all subjects.",
+    )
+    exclude_selected = st.multiselect(
+        "Exclude these subjects (blacklist)",
+        options=available_subjects, default=[], accept_new_options=True,
+        help="Pick from the dropdown, or type a name and press Enter to add it manually "
+             "(comma-separated text works too). Applied after the whitelist above.",
     )
 
     st.header("4. Downstream reports")
@@ -160,8 +198,11 @@ if run_clicked:
                     batch_path = save_upload(batch_file, "batch_list.xlsx")
                     st.write("✅ Lab Batch List saved")
 
-                exclude = [s.strip() for s in exclude_subjects.split(",") if s.strip()]
-                include = [s.strip() for s in include_subjects.split(",") if s.strip()]
+                # Each selected/typed entry is further split on commas, so
+                # a manually-typed "A, B, C" (added as one new option) is
+                # expanded into three separate subjects too.
+                exclude = [s.strip() for item in exclude_selected for s in str(item).split(",") if s.strip()]
+                include = [s.strip() for item in include_selected for s in str(item).split(",") if s.strip()]
 
                 # 1) VMS Report
                 st.write("⏳ Building VMS Report…")
