@@ -80,10 +80,19 @@ with st.sidebar:
     )
 
     st.header("2. Attendance range")
-    low, high = st.slider(
-        "Show students with attendance % between",
-        min_value=0.0, max_value=100.0, value=(0.0, 75.0), step=0.5,
-    )
+    low_col, high_col = st.columns(2)
+    with low_col:
+        low = st.number_input(
+            "Low % (inclusive)", min_value=0.0, max_value=100.0,
+            value=0.0, step=0.01, format="%.2f",
+        )
+    with high_col:
+        high = st.number_input(
+            "High % (inclusive)", min_value=0.0, max_value=100.0,
+            value=75.0, step=0.01, format="%.2f",
+        )
+    if low > high:
+        st.warning("Low % is greater than High % — swap them or the report will come back empty.")
 
     st.header("3. Filters")
     dept = st.text_input("Department", value="ALL", help="e.g. BCA, MCA, or ALL")
