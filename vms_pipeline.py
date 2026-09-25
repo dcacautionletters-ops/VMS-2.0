@@ -732,7 +732,17 @@ def build_report(input_path, output_path, low=0.0, high=75.0, dept="ALL", exclud
     if not df:
         raise ValueError("No data left after filtering — check the input file / include / exclude list.")
 
-    depts = sorted({r["_dept"] for r in df}) if dept == "ALL" else [dept]
+    all_depts = sorted({r["_dept"] for r in df})
+    if dept and dept.strip().upper() not in ("ALL", ""):
+        wanted = dept.strip().upper()
+        depts = [d for d in all_depts if d == wanted]
+        if not depts:
+            raise ValueError(
+                f"No rows found for department '{dept}'. Departments present in this file: "
+                f"{', '.join(all_depts)}"
+            )
+    else:
+        depts = all_depts
 
     wb = Workbook()
     wb.remove(wb.active)
