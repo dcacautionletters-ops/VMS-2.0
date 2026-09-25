@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Linways Attendance -> VMS Report — FORMATTING SCRIPT
+Linways Attendance -> VMS Report — ALL-IN-ONE SCRIPT
 =======================================================
 
-Formats a raw Linways export you already downloaded into the full VMS
-report (GEN / GEN ALL / per-section sheets / SUMMARY / bracket tables /
-color coding), plus the Tentative Debar List and (optionally) the
-per-semester Abstract workbook. No login or browser automation — you
-bring your own raw export.
+Two things this script can do:
+
+  1) FORMAT a raw Linways export you already downloaded into the full VMS
+     report (GEN / GEN ALL / per-section sheets / SUMMARY / bracket tables
+     / color coding) — works right now, no login needed.
+
+  2) DOWNLOAD the raw report from Linways automatically (Selenium), then
+     format it — needs a few CSS selectors filled in first (see the
+     SELECTOR CONFIG section below and the instructions at the bottom of
+     this file).
 
 USAGE
 -----
@@ -19,11 +24,17 @@ Just format a file you already have:
     Drop specific subjects (blacklist, applied after --include):
         --exclude "Soft Skill,Yoga"
 
-Build just the Debar List from a raw export:
-    python vms_pipeline.py debar raw_attendance.xlsx Debar_List.xlsx
+Download from Linways AND format in one go (after filling in selectors):
+    python vms_pipeline.py pipeline --username YOU --password PASS --output VMS_Report.xlsx \
+        --from-date 01/06/2026 --to-date 31/07/2026
 
-Build just the Abstract workbook from a raw export + Lab Batch List:
-    python vms_pipeline.py abstract raw_attendance.xlsx BatchList.xlsx Abstract_Report.xlsx
+    --from-date/--to-date filter the report AT THE SOURCE (Linways' own date
+    range field on the report page) before it's downloaded — they need
+    SELECTORS["date_from"] / SELECTORS["date_to"] filled in first, same as
+    the other selectors (see instructions at the bottom of this file).
+
+Only download the raw file (no formatting):
+    python vms_pipeline.py download --username YOU --password PASS --from-date 01/06/2026 --to-date 31/07/2026
 """
 import argparse
 import glob
@@ -36,6 +47,40 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SELECTOR CONFIG — placeholders, fill in with real values (see bottom)
+# ══════════════════════════════════════════════════════════════════════
+LOGIN_URL = "https://presidencycollege.linways.com/ams/faculty/login"
+DOWNLOAD_DIR = os.path.abspath("./downloads")
+
+# These need to be updated from DevTools -> Inspect on the real Linways site.
+# Import selenium's By lazily so `format` mode works without selenium installed.
+#
+# Confirmed via user-supplied outerHTML (Vue.js SPA, note the data-v-* scoped
+# attrs — these hashes can change between Linways deployments/updates, so if
+# selectors break again after a Linways update, re-copy the outerHTML).
+BASE_URL = "https://presidencycollege.linways.com"
+REPORT_PATH = "/ams/faculty/attendance/consolidated-course-wise-report?redir=true"
+
+SELECTORS = {
+    "username": ("NAME", "username"),                                   # (By kind, value)
+    "password": ("NAME", "password"),
+    "login_button": ("ID", "loginBtn"),
+    "search_button": ("XPATH", "//span[normalize-space(text())='Search']"),
+    "export_dropdown_toggle": ("XPATH", "//span[normalize-space(text())='Export']"),
+    "download_button": ("XPATH", "//a[contains(@class,'dropdown-item') and normalize-space(text())='Excel']"),
+
+    # PLACEHOLDERS — this is almost certainly the "unlabeled input field
+    # (form-control)" mentioned in download_consolidated_report() below.
+    # Inspect it on the real report page and update these (it may turn out
+    # to be ONE combined daterangepicker field rather than two separate
+    # ones — if so, point both entries at the same selector and adjust
+    # set_date_range() below to type "from - to" into it in one go).
+    "date_from": ("XPATH", "//input[@placeholder='From Date']"),
+    "date_to": ("XPATH", "//input[@placeholder='To Date']"),
+}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -221,12 +266,19 @@ def load_batch_list(path):
             fac = str(row[i_fac]).strip() if row[i_fac] else ""
             if not (roll and section and course_raw and fac):
                 continue
-            # Roll 25CG102's Batch List row has a bad/merged faculty entry
-            # ("Nasrulla Khan K,PARVEZ AHMED SHARIFF") — always use Parvez
-            # for this roll instead, regardless of what the sheet says.
-            if roll.upper() == "25CG102":
-                fac = "PARVEZ AHMED SHARIFF"
             subject, batch_label = parse_course_community_name(course_raw)
+            # Roll 25CG102 (PRUTHVI RAJ H)'s Batch List row for Operating
+            # Systems Lab, BCA 2025 Section B, has a bad/merged faculty
+            # entry ("Nasrulla Khan K,PARVEZ AHMED SHARIFF") — force
+            # Parvez for THIS roll + THIS section + THIS subject only.
+            # The student's other two labs are left untouched, using
+            # whatever faculty the sheet says.
+            if (
+                roll.upper() == "25CG102"
+                and section.upper() == "BCA 2025 B"
+                and subject.strip().upper() == "OPERATING SYSTEMS LAB"
+            ):
+                fac = "PARVEZ AHMED SHARIFF"
             entries.append((section, subject, roll, batch_label, fac))
     return entries
 
@@ -563,6 +615,20 @@ def group_label(batch_label, faculty):
     return f"{batch_label} - {faculty}" if batch_label else faculty
 
 
+def group_sort_key(group):
+    """Sort (batch_label, faculty) groups by batch NUMBER (1, 2, 3 …),
+    not faculty name — so batches always appear in chronological order
+    (Batch 1, Batch 2, Batch 3 ...) instead of alphabetically by whoever
+    teaches them. Groups with no batch label sort first."""
+    batch_label, fac = group
+    if batch_label:
+        m = re.search(r"\d+", batch_label)
+        n = int(m.group()) if m else 0
+    else:
+        n = 0
+    return (n, fac)
+
+
 def build_faculty_maps(rows, C, batch_entries=None):
     """Two maps, built in one pass over the raw rows plus an optional
     cross-reference against a BCA/MCA Lab Batch List (`batch_entries`,
@@ -620,7 +686,7 @@ def build_faculty_maps(rows, C, batch_entries=None):
         for key, groups in batch_subject_groups.items():
             mapping[key] = set(groups)
 
-    subject_groups = {k: sorted(v, key=lambda g: (g[1], g[0] or "")) for k, v in mapping.items()}
+    subject_groups = {k: sorted(v, key=group_sort_key) for k, v in mapping.items()}
 
     # ANY subject with more than one distinct GROUP in a section gets
     # split into a row per group — this isn't lab-only, and it isn't
@@ -705,7 +771,7 @@ def resolve_groups_for_sheet(sheet_title, subject, subject_groups):
     for (section, subj), grp_list in subject_groups.items():
         if subj == subject and series_of(section) == base:
             groups.update(grp_list)
-    return sorted(groups, key=lambda g: (g[1], g[0] or ""))
+    return sorted(groups, key=group_sort_key)
 
 
 def in_subfolder(output_path, folder_name):
@@ -1022,24 +1088,23 @@ def _abstract_section_rows(section, subject_rows, C, batch_map):
                 continue
             by_group.setdefault(group_key, [0] * 6)[bidx] += 1
 
-        sort_key = lambda g: (g[1], g[0] or "")
-
         if not by_group:
             # Nobody fell into a shortage bucket (e.g. all-zero count for
             # this subject) — still show the group(s) rather than leaving
-            # the column blank.
+            # the column blank. Show the batch label whenever it's known,
+            # even if this subject only has ONE group in this section —
+            # a single batch is still a batch and shouldn't be hidden.
             if all_groups:
-                for batch_label, fac in sorted(all_groups, key=sort_key):
-                    display = group_label(batch_label, fac) if len(all_groups) > 1 else fac
+                for batch_label, fac in sorted(all_groups, key=group_sort_key):
+                    display = group_label(batch_label, fac) if batch_label else fac
                     out_rows.append({"subject": subj, "faculty": display, "buckets": [0] * 6, "total": 0})
             else:
                 out_rows.append({"subject": subj, "faculty": "", "buckets": [0] * 6, "total": 0})
             continue
 
-        multi = len(by_group) > 1
-        for batch_label, fac in sorted(by_group, key=sort_key):
+        for batch_label, fac in sorted(by_group, key=group_sort_key):
             buckets = by_group[(batch_label, fac)]
-            display = group_label(batch_label, fac) if multi else fac
+            display = group_label(batch_label, fac) if batch_label else fac
             out_rows.append({"subject": subj, "faculty": display, "buckets": buckets, "total": sum(buckets)})
     return out_rows
 
@@ -1417,6 +1482,219 @@ def build_debar_list(input_path, output_path, date_str=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# PART 2 — LINWAYS DOWNLOAD (Selenium)
+# ══════════════════════════════════════════════════════════════════════
+def _by(kind):
+    """Lazily resolve a Selenium By constant from its string name."""
+    from selenium.webdriver.common.by import By
+    return getattr(By, kind)
+
+
+def build_driver(headless=True):
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    opts = Options()
+    if headless:
+        opts.add_argument("--headless=new")
+    opts.add_argument("--window-size=1400,1000")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--disable-popup-blocking")  # so we can dismiss popups ourselves, not have Chrome swallow them
+    opts.add_experimental_option("prefs", {
+        "download.default_directory": DOWNLOAD_DIR,
+        "download.prompt_for_download": False,
+        "safebrowsing.enabled": True,
+        # 2 = block. Stops the native "Site wants to show notifications" prompt
+        # from ever appearing, so it can never block a click.
+        "profile.default_content_setting_values.notifications": 2,
+    })
+    return webdriver.Chrome(options=opts)
+
+
+def login(driver, username, password):
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    driver.get(LOGIN_URL)
+    wait = WebDriverWait(driver, 20)
+
+    kind, val = SELECTORS["username"]
+    user_field = wait.until(EC.presence_of_element_located((_by(kind), val)))
+    user_field.clear()
+    user_field.send_keys(username)
+
+    kind, val = SELECTORS["password"]
+    pass_field = driver.find_element(_by(kind), val)
+    pass_field.clear()
+    pass_field.send_keys(password)
+
+    kind, val = SELECTORS["login_button"]
+    driver.find_element(_by(kind), val).click()
+
+    wait.until(lambda d: "login" not in d.current_url.lower())
+    print("Logged in. Current URL:", driver.current_url)
+
+
+def dismiss_popups(driver):
+    """Best-effort close of common modal/notice popups that may appear after login."""
+    from selenium.webdriver.common.by import By
+    common_close_selectors = [
+        (By.CSS_SELECTOR, "button.close"),
+        (By.CSS_SELECTOR, "[aria-label='Close']"),
+        (By.XPATH, "//button[contains(text(),'Close')]"),
+        (By.XPATH, "//button[contains(text(),'OK')]"),
+        (By.XPATH, "//button[contains(text(),'Got it')]"),
+        (By.XPATH, "//span[contains(@class,'close')]"),
+        (By.CSS_SELECTOR, ".modal.show .close"),
+        (By.CSS_SELECTOR, ".swal2-close"),
+        (By.CSS_SELECTOR, ".swal2-confirm"),
+    ]
+    for kind, val in common_close_selectors:
+        try:
+            elems = driver.find_elements(kind, val)
+            for el in elems:
+                if el.is_displayed():
+                    el.click()
+                    time.sleep(0.5)
+        except Exception:
+            pass
+
+
+def set_date_range(driver, from_date, to_date):
+    """Fill in the report page's date range field(s) before clicking Search.
+
+    from_date/to_date are plain strings (e.g. "01/06/2026") passed straight
+    through to send_keys — match whatever format the real field expects.
+    No-op if both are None, so existing behavior is unchanged when the
+    caller doesn't ask for a date filter.
+
+    NOTE: SELECTORS["date_from"] / SELECTORS["date_to"] are placeholders
+    (see the SELECTOR CONFIG section and instructions at the bottom of this
+    file) — confirm the real selectors via DevTools before relying on this.
+    """
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    if not from_date and not to_date:
+        return
+
+    wait = WebDriverWait(driver, 20)
+
+    def fill(step_name, value):
+        if not value:
+            return
+        kind, val = SELECTORS[step_name]
+        el = wait.until(EC.element_to_be_clickable((_by(kind), val)))
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el
+        )
+        el.click()
+        try:
+            el.clear()
+        except Exception:
+            pass  # some datepicker widgets reject .clear() on a readonly input — ignore and just type
+        el.send_keys(value)
+        time.sleep(0.3)
+
+    fill("date_from", from_date)
+    fill("date_to", to_date)
+    dismiss_popups(driver)
+
+
+def download_consolidated_report(driver, from_date=None, to_date=None):
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    wait = WebDriverWait(driver, 20)
+    debug_dir = os.path.join(DOWNLOAD_DIR, "..", "debug_screenshots")
+    debug_dir = os.path.abspath(debug_dir)
+    os.makedirs(debug_dir, exist_ok=True)
+
+    def snap(name):
+        path = os.path.join(debug_dir, name)
+        try:
+            driver.save_screenshot(path)
+            print(f"  [screenshot] {path}")
+        except Exception as e:
+            print(f"  [screenshot failed] {e}")
+
+    def click(step_name, settle=1.0):
+        """Dismiss any popup/notification, wait for the element, click it.
+
+        Scrolls the element to the middle of the viewport first (not just
+        "into view", which can leave it hidden behind a sticky header), and
+        falls back to a JS click if a normal click gets intercepted by an
+        overlapping element (common on this Vue app's fixed top navbar).
+        """
+        dismiss_popups(driver)
+        kind, val = SELECTORS[step_name]
+        el = wait.until(EC.element_to_be_clickable((_by(kind), val)))
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el
+        )
+        time.sleep(0.3)
+        try:
+            el.click()
+        except Exception:
+            # Fallback: click directly via JS, bypassing whatever element
+            # (e.g. the sticky top navbar) intercepted the real click.
+            driver.execute_script("arguments[0].click();", el)
+        time.sleep(settle)  # let the Vue app re-render before the next lookup
+        dismiss_popups(driver)
+
+    # Close any welcome/notice popups that may block the first click
+    dismiss_popups(driver)
+    time.sleep(1)
+    dismiss_popups(driver)
+
+    # 1. Go straight to the report page (confirmed via outerHTML — its <a> has
+    # a real href, so no need to click through the ambiguous "Attendance" ->
+    # "Attendance" submenu).
+    driver.get(BASE_URL + REPORT_PATH)
+    time.sleep(2)
+    dismiss_popups(driver)
+    snap("01_report_page.png")
+
+    # NOTE: there's an unlabeled input field (form-control) on this page whose
+    # purpose isn't confirmed yet — this is likely the date range field(s)
+    # now targeted by SELECTORS["date_from"]/["date_to"]. Confirm via
+    # DevTools and adjust if it turns out to be one combined field instead.
+    if from_date or to_date:
+        print(f"  Setting date range: {from_date or '(open)'} — {to_date or '(open)'}")
+        set_date_range(driver, from_date, to_date)
+        snap("01b_after_date_range.png")
+
+    # 2. Click "Search" to load the results (can take up to ~60s for all
+    # batches to populate on a slow report)
+    print("  Clicking Search — waiting up to 60s for batches/results to load...")
+    click("search_button", settle=60.0)
+    snap("02_after_search.png")
+
+    # 3. Open the export dropdown
+    click("export_dropdown_toggle")
+    snap("03_after_export_click.png")
+
+    # 4. Click "Excel" inside the now-visible dropdown
+    click("download_button", settle=2.0)
+    snap("04_after_excel_click.png")
+
+    time.sleep(3)
+    print(f"Download click sequence completed. Debug screenshots in: {debug_dir}")
+
+
+def wait_for_new_download(before_files, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        after = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*.xlsx")))
+        new_files = {f for f in (after - before_files) if not f.endswith(".crdownload")}
+        if new_files:
+            return max(new_files, key=os.path.getmtime)
+        time.sleep(1)
+    raise TimeoutError("No new .xlsx file appeared in the download folder.")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════
 def run_downstream_reports(vms_report_path, raw_path, args):
@@ -1466,6 +1744,13 @@ def main():
     ss_format.add_argument("--exclude-soft-skill", dest="soft_skill", action="store_false", help="Drop Soft Skill from the report")
     # Omit both flags to be prompted (y/N) at runtime instead.
 
+    p_download = sub.add_parser("download", help="Only download the raw report from Linways")
+    p_download.add_argument("--username", default="vishwanath.admin@presidency.edu.in")
+    p_download.add_argument("--password", default="Gagan@143")
+    p_download.add_argument("--show-browser", action="store_true")
+    p_download.add_argument("--from-date", default=None, help="Start of date range for the Linways report (format must match the real field once selectors are confirmed)")
+    p_download.add_argument("--to-date", default=None, help="End of date range for the Linways report")
+
     p_debar = sub.add_parser("debar", help="Build the Tentative Debar List from a raw VMS export")
     p_debar.add_argument("input", nargs="?", default=None, help="Omit to auto-use the most recently generated VMS Report")
     p_debar.add_argument("output")
@@ -1477,6 +1762,30 @@ def main():
     p_abstract.add_argument("output")
     p_abstract.add_argument("--date", default=None, help="'as of' date shown in the abstract workbook heading, dd.mm.yyyy (default: today)")
     p_abstract.add_argument("--program", default="BCA", help="Program name shown in the abstract workbook heading, e.g. 'BCA' or 'MCA'")
+
+    p_pipeline = sub.add_parser("pipeline", help="Download from Linways, format, build the debar list, and (with --batch-list) the abstract workbook — all in one go")
+    p_pipeline.add_argument("--username", default=os.environ.get("LINWAYS_USERNAME", "vishwanath.admin@presidency.edu.in"))
+    p_pipeline.add_argument("--password", default=os.environ.get("LINWAYS_PASSWORD", "Gagan@143"))
+    p_pipeline.add_argument("--output", default="VMS_Report.xlsx")
+    p_pipeline.add_argument("--low", type=float, default=None, help="Omit to be prompted at runtime")
+    p_pipeline.add_argument("--high", type=float, default=None, help="Omit to be prompted at runtime")
+    p_pipeline.add_argument("--dept", default="ALL")
+    p_pipeline.add_argument("--exclude", default="", help="Comma-separated subjects to drop")
+    p_pipeline.add_argument("--include", default="", help="Comma-separated subjects to keep (whitelist, applied before --exclude); default: keep all")
+    p_pipeline.add_argument("--batch-list", default=None, help="Path to a BCA/MCA Lab Batch List workbook — cross-references lab/internship faculty & batch by Reg No, and unlocks the abstract workbook")
+    p_pipeline.add_argument("--date", default=None, help="'as of' date shown in the debar list and abstract workbook, dd.mm.yyyy (default: today)")
+    p_pipeline.add_argument("--program", default="BCA", help="Program name shown in the abstract workbook heading, e.g. 'BCA' or 'MCA'")
+    p_pipeline.add_argument("--debar-output", default=None, help="Debar list filename (default: derived from --output)")
+    p_pipeline.add_argument("--abstract-output", default=None, help="Abstract workbook filename (default: derived from --output); only built if --batch-list is given")
+    p_pipeline.add_argument("--skip-debar", action="store_true", help="Don't build the debar list")
+    p_pipeline.add_argument("--skip-abstract", action="store_true", help="Don't build the abstract workbook even if --batch-list is given")
+    ss_pipeline = p_pipeline.add_mutually_exclusive_group()
+    ss_pipeline.add_argument("--include-soft-skill", dest="soft_skill", action="store_true", default=None, help="Include Soft Skill in the report")
+    ss_pipeline.add_argument("--exclude-soft-skill", dest="soft_skill", action="store_false", help="Drop Soft Skill from the report")
+    # Omit both flags to be prompted (y/N) at runtime instead.
+    p_pipeline.add_argument("--show-browser", action="store_true")
+    p_pipeline.add_argument("--from-date", default=None, help="Start of date range for the Linways report (format must match the real field once selectors are confirmed)")
+    p_pipeline.add_argument("--to-date", default=None, help="End of date range for the Linways report")
 
     args = ap.parse_args()
 
@@ -1503,6 +1812,84 @@ def main():
         for s in sems:
             print(f"  Sheet: SUB {sem_label(s)} SEM")
 
+    elif args.mode == "download":
+        if not args.username or not args.password:
+            raise SystemExit("Provide --username/--password or LINWAYS_USERNAME/LINWAYS_PASSWORD env vars.")
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        before = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*.xlsx")))
+        driver = build_driver(headless=not args.show_browser)
+        try:
+            login(driver, args.username, args.password)
+            download_consolidated_report(driver, from_date=args.from_date, to_date=args.to_date)
+        finally:
+            driver.quit()
+
+        try:
+            raw_path = wait_for_new_download(before, timeout=90)
+            print(f"SUCCESS — downloaded: {raw_path}")
+        except TimeoutError:
+            print("NO FILE ARRIVED within 90s. Check the debug_screenshots folder "
+                  "next to your downloads folder to see what the page looked like "
+                  "at each step.")
+
+    elif args.mode == "pipeline":
+        if not args.username or not args.password:
+            raise SystemExit("Provide --username/--password or LINWAYS_USERNAME/LINWAYS_PASSWORD env vars.")
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        before = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*.xlsx")))
+
+        driver = build_driver(headless=not args.show_browser)
+        try:
+            login(driver, args.username, args.password)
+            download_consolidated_report(driver, from_date=args.from_date, to_date=args.to_date)
+        finally:
+            driver.quit()
+
+        raw_path = wait_for_new_download(before)
+        print(f"Downloaded raw report: {raw_path}")
+
+        low, high = prompt_for_range(args.low, args.high)
+        include_soft_skill = prompt_for_soft_skill(args.soft_skill)
+        exclude = [s.strip() for s in args.exclude.split(",") if s.strip()]
+        include = [s.strip() for s in args.include.split(",") if s.strip()]
+        out, summaries = build_report(raw_path, args.output, low, high, args.dept, exclude, include, include_soft_skill, args.batch_list)
+        print(f"VMS Report saved: {out}")
+        for s in summaries:
+            print(f"  {s['Section']}: {s['Count']}")
+        run_downstream_reports(out, raw_path, args)
+
 
 if __name__ == "__main__":
     main()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# HOW TO FIND THE REAL SELECTORS (needed only for `download`/`pipeline` modes)
+# ══════════════════════════════════════════════════════════════════════
+# `format` mode above needs none of this — it works right now on any raw
+# Linways export you already have.
+#
+# For `download`/`pipeline`, do this once (~2 minutes):
+# 1. Open https://presidencycollege.linways.com/ams/faculty/login in Chrome.
+# 2. Right-click the username/email field -> Inspect. Note its id/name.
+#    Update SELECTORS["username"] near the top of this file, e.g.:
+#      "username": ("ID", "loginId")
+# 3. Same for the password field -> SELECTORS["password"].
+# 4. Right-click the Login button -> Inspect -> SELECTORS["login_button"].
+# 5. After logging in manually, go to wherever you currently download the
+#    "Consolidated Course Wise Attendance Report" from (usually a Reports
+#    menu). Inspect that nav link -> SELECTORS["reports_nav"] and
+#    SELECTORS["consolidated_report_link"].
+# 6. Inspect the actual Download/Export button on the report page ->
+#    SELECTORS["download_button"].
+# 7. For date-range filtering (--from-date/--to-date), inspect the
+#    unlabeled form-control field(s) on the report page mentioned in
+#    download_consolidated_report() -> SELECTORS["date_from"] and
+#    SELECTORS["date_to"]. If it turns out to be ONE combined
+#    daterangepicker field rather than two separate inputs, point both
+#    entries at that same selector and tell me — set_date_range() will
+#    need a small tweak to type "from - to" into it in one go instead of
+#    filling two fields.
+# 8. Send me the outerHTML (right-click -> Copy -> Copy outerHTML) of each
+#    of those elements and I'll fill these in precisely for you.
+# ══════════════════════════════════════════════════════════════════════
