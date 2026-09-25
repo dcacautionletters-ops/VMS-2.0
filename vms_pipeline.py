@@ -876,26 +876,36 @@ def _dfont(size, bold=False):
     return Font(name="Calibri", size=size, bold=bold)
 
 
-DEBAR_STYLE = {
-    "title": dict(font=_dfont(14, True), alignment=Alignment(horizontal="center"), border=DEBAR_BORDER_ALL),
-    "hdrNarrow": dict(font=_dfont(11, True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-    "hdrSubject": dict(font=_dfont(9, True), alignment=Alignment(horizontal="center", vertical="center", wrap_text=True), border=DEBAR_BORDER_ALL),
-    "dataSlNo": dict(font=_dfont(11), alignment=Alignment(horizontal="center"), border=DEBAR_BORDER_ALL),
-    "dataRoll": dict(font=_dfont(11), alignment=Alignment(), border=DEBAR_BORDER_ALL),
-    "dataName": dict(font=_dfont(11), alignment=Alignment(), border=DEBAR_BORDER_ALL),
-    "dataSubject": dict(font=_dfont(11), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-    "dataSubjectBold": dict(font=_dfont(11, True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-    "footerLabel": dict(font=_dfont(11, True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-    "footerCount": dict(font=_dfont(11), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-    "sigLabel": dict(font=_dfont(11, True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-    "sigClass": dict(font=_dfont(11, True), alignment=Alignment(), border=None),
-    "sigHod": dict(font=_dfont(11, True), alignment=Alignment(horizontal="center", vertical="center"), border=None),
-    "legendHdr": dict(font=Font(name="Calibri", size=11, bold=True, color="FFFFFF"),
-                       alignment=Alignment(horizontal="center", vertical="center"),
-                       border=DEBAR_BORDER_ALL, fill=HEADER_FILL),
-    "legendSubject": dict(font=_dfont(9, True), alignment=Alignment(horizontal="center", vertical="center", wrap_text=True), border=DEBAR_BORDER_ALL),
-    "legendFaculty": dict(font=_dfont(11), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
-}
+def build_debar_style(scale=1.0):
+    """Build the debar-list cell style set, with every font size scaled by
+    `scale` (rounded to the nearest point). scale=1.0 reproduces the
+    original sizes exactly; a bigger scale is used for the notice-board
+    variant so it reads clearly from a distance."""
+    def sz(n):
+        return max(1, round(n * scale))
+    return {
+        "title": dict(font=_dfont(sz(14), True), alignment=Alignment(horizontal="center"), border=DEBAR_BORDER_ALL),
+        "hdrNarrow": dict(font=_dfont(sz(11), True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+        "hdrSubject": dict(font=_dfont(sz(9), True), alignment=Alignment(horizontal="center", vertical="center", wrap_text=True), border=DEBAR_BORDER_ALL),
+        "dataSlNo": dict(font=_dfont(sz(11)), alignment=Alignment(horizontal="center"), border=DEBAR_BORDER_ALL),
+        "dataRoll": dict(font=_dfont(sz(11)), alignment=Alignment(), border=DEBAR_BORDER_ALL),
+        "dataName": dict(font=_dfont(sz(11)), alignment=Alignment(), border=DEBAR_BORDER_ALL),
+        "dataSubject": dict(font=_dfont(sz(11)), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+        "dataSubjectBold": dict(font=_dfont(sz(11), True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+        "footerLabel": dict(font=_dfont(sz(11), True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+        "footerCount": dict(font=_dfont(sz(11)), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+        "sigLabel": dict(font=_dfont(sz(11), True), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+        "sigClass": dict(font=_dfont(sz(11), True), alignment=Alignment(), border=None),
+        "sigHod": dict(font=_dfont(sz(11), True), alignment=Alignment(horizontal="center", vertical="center"), border=None),
+        "legendHdr": dict(font=Font(name="Calibri", size=sz(11), bold=True, color="FFFFFF"),
+                           alignment=Alignment(horizontal="center", vertical="center"),
+                           border=DEBAR_BORDER_ALL, fill=HEADER_FILL),
+        "legendSubject": dict(font=_dfont(sz(9), True), alignment=Alignment(horizontal="center", vertical="center", wrap_text=True), border=DEBAR_BORDER_ALL),
+        "legendFaculty": dict(font=_dfont(sz(11)), alignment=Alignment(horizontal="center", vertical="center"), border=DEBAR_BORDER_ALL),
+    }
+
+
+DEBAR_STYLE = build_debar_style(1.0)
 
 # Legend table column zones (matching the reference format). SUBJECT spans
 # the same three columns as Sl No/Roll No/Student Name in the debar table
@@ -909,8 +919,8 @@ LEGEND_SIG_START, LEGEND_SIG_END = 14, 15
 LEGEND_ROW_H = 30
 
 
-def _dapply(cell, style_name):
-    st = DEBAR_STYLE[style_name]
+def _dapply(cell, style_name, styles=None):
+    st = (styles or DEBAR_STYLE)[style_name]
     cell.font = st["font"]
     cell.alignment = st["alignment"]
     if st["border"] is not None:
@@ -1255,19 +1265,38 @@ def build_abstract(input_path, batch_list_path, output_path, date_str=None, prog
     return output_path, sems_present
 
 
-def build_debar_list(input_path, output_path, date_str=None):
+def build_debar_list(input_path, output_path, date_str=None, notice_board=False,
+                      font_scale=1.6, row_scale=1.6):
     """
     For every sheet (batch) in a raw VMS export, build a matching
     "TENTATIVE DEBAR LIST I" sheet: college header image, merged title row,
     the same fonts/borders/column widths as the reference layout, subject
     columns kept as-is, per-subject shortage counts at the bottom, and
     Subject Teacher / Class Teacher / HOD signature lines.
+
+    notice_board=True builds a print-friendly variant meant for posting on
+    a physical notice board instead of internal/faculty use: the SUBJECT /
+    FACULTY IN CHARGE / NO of students / Plan of Action / Signature legend
+    table and the per-subject shortage-count footer row are both left out
+    (that information isn't useful to a student reading the board), every
+    font is scaled up by `font_scale` and every row height by `row_scale`
+    for legibility from a distance, and the Class Teacher / HOD / Principal
+    signature line moves up to sit just below the student data instead of
+    below the legend. Page setup is unchanged either way — one page wide
+    (fitToWidth=1), with as many pages tall as needed (fitToHeight=0) so a
+    section with more students having a shortage simply flows onto more
+    printed pages rather than being squeezed to fit.
     """
     if date_str is None:
         date_str = time.strftime("%d.%m.%Y")
 
     input_path = resolve_input_path(input_path)
-    output_path = in_subfolder(output_path, "Tentative Debar List")
+    styles = build_debar_style(font_scale) if notice_board else DEBAR_STYLE
+    row2_h = DEBAR_ROW2_H * row_scale if notice_board else DEBAR_ROW2_H
+    row3_h = DEBAR_ROW3_H * row_scale if notice_board else DEBAR_ROW3_H
+    data_row_h = DEBAR_DATA_ROW_H * row_scale if notice_board else DEBAR_DATA_ROW_H
+    folder_name = "Tentative Debar List (Notice Board)" if notice_board else "Tentative Debar List"
+    output_path = in_subfolder(output_path, folder_name)
 
     src = load_workbook(input_path, data_only=True)
     out = Workbook()
@@ -1348,23 +1377,24 @@ def build_debar_list(input_path, output_path, date_str=None):
                 ows.add_image(img, "A1")
 
             # Row 2: title
-            ows.row_dimensions[2].height = DEBAR_ROW2_H
+            ows.row_dimensions[2].height = row2_h
             ows.merge_cells(f"A2:{last_col_letter}2")
             title_cell = ows.cell(row=2, column=1)
-            title_cell.value = f'TENTATIVE DEBAR LIST I - "{sws.title}" as of {date_str}'
-            _dapply(title_cell, "title")
+            title_cell.value = f'TENTATIVE DEBAR LIST I - "{sws.title}" as of {date_str}' + \
+                (" (NOTICE BOARD COPY)" if notice_board else "")
+            _dapply(title_cell, "title", styles)
             for c in range(1, n_cols + 1):
                 ows.cell(row=2, column=c).border = DEBAR_BORDER_ALL
 
             # Row 3: header
-            ows.row_dimensions[3].height = DEBAR_ROW3_H
+            ows.row_dimensions[3].height = row3_h
             header_values = ["Sl No.", "Roll No.", "Student Name"] + list(subject_headers) + \
                              ["Final Avg", "No of subjects having Shortage", "Student Signature"]
             for i, val in enumerate(header_values):
                 c = i + 1
                 cell = ows.cell(row=3, column=c)
                 cell.value = val
-                _dapply(cell, "hdrNarrow" if c <= 3 else "hdrSubject")
+                _dapply(cell, "hdrNarrow" if c <= 3 else "hdrSubject", styles)
 
             # Data rows
             counts = [0] * n_subjects
@@ -1385,76 +1415,81 @@ def build_debar_list(input_path, output_path, date_str=None):
                 final_avg = srow[idx_final].value if len(srow) > idx_final else None
                 shortage_n = srow[idx_range].value if len(srow) > idx_range else None
 
-                ows.row_dimensions[row_out].height = DEBAR_DATA_ROW_H
-                c1 = ows.cell(row=row_out, column=1, value=sl_no); _dapply(c1, "dataSlNo")
-                c2 = ows.cell(row=row_out, column=2, value=roll); _dapply(c2, "dataRoll")
-                c3 = ows.cell(row=row_out, column=3, value=student_name); _dapply(c3, "dataName")
+                ows.row_dimensions[row_out].height = data_row_h
+                c1 = ows.cell(row=row_out, column=1, value=sl_no); _dapply(c1, "dataSlNo", styles)
+                c2 = ows.cell(row=row_out, column=2, value=roll); _dapply(c2, "dataRoll", styles)
+                c3 = ows.cell(row=row_out, column=3, value=student_name); _dapply(c3, "dataName", styles)
                 for i, v in enumerate(subj_vals):
                     cell = ows.cell(row=row_out, column=4 + i, value=(None if v == "" else v))
-                    _dapply(cell, "dataSubject")
+                    _dapply(cell, "dataSubject", styles)
                     if v not in (None, ""):
                         counts[i] += 1
                         grp = student_group.get((row_section, str(subject_headers[i]).strip(), str(roll).strip()))
                         if grp and grp[1]:
                             multi_group_counts[i][grp] += 1
-                cf = ows.cell(row=row_out, column=final_avg_col, value=final_avg); _dapply(cf, "dataSubject")
-                cs = ows.cell(row=row_out, column=shortage_col, value=shortage_n); _dapply(cs, "dataSubjectBold")
-                csig = ows.cell(row=row_out, column=signature_col); _dapply(csig, "dataSubject")  # left blank for the student to sign
+                cf = ows.cell(row=row_out, column=final_avg_col, value=final_avg); _dapply(cf, "dataSubject", styles)
+                cs = ows.cell(row=row_out, column=shortage_col, value=shortage_n); _dapply(cs, "dataSubjectBold", styles)
+                csig = ows.cell(row=row_out, column=signature_col); _dapply(csig, "dataSubject", styles)  # left blank for the student to sign
                 row_out += 1
 
             last_data_row = row_out - 1
 
-            # Footer: counts per subject
-            footer_row = last_data_row + 1
-            ows.row_dimensions[footer_row].height = DEBAR_FOOTER_H
-            for c in range(1, n_cols + 1):
-                cell = ows.cell(row=footer_row, column=c)
-                if c == 3:
-                    cell.value = "No of students having shortage"
-                    _dapply(cell, "footerLabel")
-                elif 4 <= c <= 3 + n_subjects:
-                    cell.value = counts[c - 4]
-                    _dapply(cell, "footerLabel")
-                else:
-                    _dapply(cell, "footerCount")
+            if not notice_board:
+                # Footer: counts per subject
+                footer_row = last_data_row + 1
+                ows.row_dimensions[footer_row].height = DEBAR_FOOTER_H
+                for c in range(1, n_cols + 1):
+                    cell = ows.cell(row=footer_row, column=c)
+                    if c == 3:
+                        cell.value = "No of students having shortage"
+                        _dapply(cell, "footerLabel")
+                    elif 4 <= c <= 3 + n_subjects:
+                        cell.value = counts[c - 4]
+                        _dapply(cell, "footerLabel")
+                    else:
+                        _dapply(cell, "footerCount")
 
-            # Legend: SUBJECT / FACULTY IN CHARGE / NO of students /
-            # Plan of Action / Signature — one row per subject column above.
-            legend_entries = []
-            for i, subj in enumerate(subject_headers):
-                subj_s = str(subj).strip()
-                grp_list = resolve_groups_for_sheet(sws.title, subj_s, subject_groups)
+                # Legend: SUBJECT / FACULTY IN CHARGE / NO of students /
+                # Plan of Action / Signature — one row per subject column above.
+                legend_entries = []
+                for i, subj in enumerate(subject_headers):
+                    subj_s = str(subj).strip()
+                    grp_list = resolve_groups_for_sheet(sws.title, subj_s, subject_groups)
 
-                if len(grp_list) > 1 and multi_group_counts[i]:
-                    # more than one distinct GROUP genuinely teaches this
-                    # subject within this section — different lab batches
-                    # (even under the same faculty), or a language/theory
-                    # subject split into sub-groups by different faculty —
-                    # one legend row per group, each with that group's own
-                    # (accurate) student count and, when known (labs only),
-                    # which batch it covers.
-                    rows_for_subj = [
-                        {"faculty": group_label(batch_label, fac),
-                         "count": multi_group_counts[i].get((batch_label, fac), 0)}
-                        for batch_label, fac in grp_list
-                    ]
-                else:
-                    names = " / ".join(dict.fromkeys(fac for _, fac in grp_list))
-                    rows_for_subj = [{"faculty": names, "count": counts[i]}]
+                    if len(grp_list) > 1 and multi_group_counts[i]:
+                        # more than one distinct GROUP genuinely teaches this
+                        # subject within this section — different lab batches
+                        # (even under the same faculty), or a language/theory
+                        # subject split into sub-groups by different faculty —
+                        # one legend row per group, each with that group's own
+                        # (accurate) student count and, when known (labs only),
+                        # which batch it covers.
+                        rows_for_subj = [
+                            {"faculty": group_label(batch_label, fac),
+                             "count": multi_group_counts[i].get((batch_label, fac), 0)}
+                            for batch_label, fac in grp_list
+                        ]
+                    else:
+                        names = " / ".join(dict.fromkeys(fac for _, fac in grp_list))
+                        rows_for_subj = [{"faculty": names, "count": counts[i]}]
 
-                legend_entries.append({"subject": subj, "rows": rows_for_subj})
+                    legend_entries.append({"subject": subj, "rows": rows_for_subj})
 
-            legend_start = footer_row + 3
-            last_legend_row = _write_debar_legend(ows, legend_start, legend_entries)
+                legend_start = footer_row + 3
+                last_legend_row = _write_debar_legend(ows, legend_start, legend_entries)
+                sig_row2 = last_legend_row + 6
+            else:
+                # Notice-board copy: no footer counts, no legend — the
+                # signature line sits a few rows below the student data.
+                sig_row2 = last_data_row + 4
 
-            # Class Teacher / HOD / Principal signature line, a few rows down
-            sig_row2 = last_legend_row + 6
+            # Class Teacher / HOD / Principal signature line
             class_cell = ows.cell(row=sig_row2, column=LEGEND_SUBJECT_START, value="Class Teacher Signature")
-            _dapply(class_cell, "sigClass")
+            _dapply(class_cell, "sigClass", styles)
             hod_cell = ows.cell(row=sig_row2, column=LEGEND_COUNT_START, value="HOD")
-            _dapply(hod_cell, "sigHod")
+            _dapply(hod_cell, "sigHod", styles)
             principal_cell = ows.cell(row=sig_row2, column=LEGEND_PLAN_START, value="PRINCIPAL")
-            _dapply(principal_cell, "sigHod")
+            _dapply(principal_cell, "sigHod", styles)
 
             ows.sheet_view.showGridLines = False
             ows.page_setup.orientation = "landscape"
@@ -1698,9 +1733,9 @@ def wait_for_new_download(before_files, timeout=30):
 # CLI
 # ══════════════════════════════════════════════════════════════════════
 def run_downstream_reports(vms_report_path, raw_path, args):
-    """After a VMS Report is built, chain the debar list and (if a batch
-    list was given) the abstract workbook — used by both `format` and
-    `pipeline` so one command produces everything."""
+    """After a VMS Report is built, chain the debar list, its notice-board
+    copy, and (if a batch list was given) the abstract workbook — used by
+    both `format` and `pipeline` so one command produces everything."""
     base, _ = os.path.splitext(os.path.basename(args.output if hasattr(args, "output") else vms_report_path))
 
     if not args.skip_debar:
@@ -1709,6 +1744,13 @@ def run_downstream_reports(vms_report_path, raw_path, args):
         print(f"Debar list saved: {dout}")
         for sheet_name, ok, detail in log:
             print(f"  {'OK' if ok else 'SKIPPED'} {sheet_name}: {detail}")
+
+        if not getattr(args, "skip_notice_board", False):
+            notice_output = getattr(args, "notice_board_output", None) or f"{base}_Debar_NoticeBoard.xlsx"
+            nout, nlog = build_debar_list(vms_report_path, notice_output, args.date, notice_board=True)
+            print(f"Notice-board debar list saved: {nout}")
+            for sheet_name, ok, detail in nlog:
+                print(f"  {'OK' if ok else 'SKIPPED'} {sheet_name}: {detail}")
 
     if args.batch_list and not args.skip_abstract:
         abstract_output = args.abstract_output or f"{base}_Abstract.xlsx"
@@ -1739,6 +1781,8 @@ def main():
     p_format.add_argument("--abstract-output", default=None, help="Abstract workbook filename (default: derived from output); only built if --batch-list is given")
     p_format.add_argument("--skip-debar", action="store_true", help="Don't build the debar list")
     p_format.add_argument("--skip-abstract", action="store_true", help="Don't build the abstract workbook even if --batch-list is given")
+    p_format.add_argument("--skip-notice-board", action="store_true", help="Don't build the notice-board copy of the debar list")
+    p_format.add_argument("--notice-board-output", default=None, help="Notice-board debar list filename (default: derived from --output)")
     ss_format = p_format.add_mutually_exclusive_group()
     ss_format.add_argument("--include-soft-skill", dest="soft_skill", action="store_true", default=None, help="Include Soft Skill in the report")
     ss_format.add_argument("--exclude-soft-skill", dest="soft_skill", action="store_false", help="Drop Soft Skill from the report")
@@ -1755,6 +1799,13 @@ def main():
     p_debar.add_argument("input", nargs="?", default=None, help="Omit to auto-use the most recently generated VMS Report")
     p_debar.add_argument("output")
     p_debar.add_argument("--date", default=None, help="'as of' date shown in each title, dd.mm.yyyy (default: today)")
+
+    p_notice = sub.add_parser("notice", help="Build the notice-board copy of the Tentative Debar List (no legend/summary, bigger fonts) from a raw VMS export")
+    p_notice.add_argument("input", nargs="?", default=None, help="Omit to auto-use the most recently generated VMS Report")
+    p_notice.add_argument("output")
+    p_notice.add_argument("--date", default=None, help="'as of' date shown in each title, dd.mm.yyyy (default: today)")
+    p_notice.add_argument("--font-scale", type=float, default=1.6, help="Font-size multiplier vs the normal debar list (default 1.6)")
+    p_notice.add_argument("--row-scale", type=float, default=1.6, help="Row-height multiplier vs the normal debar list (default 1.6)")
 
     p_abstract = sub.add_parser("abstract", help="Build the per-semester Abstract workbook from a raw consolidated report + Lab Batch List")
     p_abstract.add_argument("input", help="Raw consolidated attendance report")
@@ -1779,6 +1830,8 @@ def main():
     p_pipeline.add_argument("--abstract-output", default=None, help="Abstract workbook filename (default: derived from --output); only built if --batch-list is given")
     p_pipeline.add_argument("--skip-debar", action="store_true", help="Don't build the debar list")
     p_pipeline.add_argument("--skip-abstract", action="store_true", help="Don't build the abstract workbook even if --batch-list is given")
+    p_pipeline.add_argument("--skip-notice-board", action="store_true", help="Don't build the notice-board copy of the debar list")
+    p_pipeline.add_argument("--notice-board-output", default=None, help="Notice-board debar list filename (default: derived from --output)")
     ss_pipeline = p_pipeline.add_mutually_exclusive_group()
     ss_pipeline.add_argument("--include-soft-skill", dest="soft_skill", action="store_true", default=None, help="Include Soft Skill in the report")
     ss_pipeline.add_argument("--exclude-soft-skill", dest="soft_skill", action="store_false", help="Drop Soft Skill from the report")
@@ -1802,6 +1855,13 @@ def main():
 
     elif args.mode == "debar":
         out, log = build_debar_list(args.input, args.output, args.date)
+        print(f"Saved: {out}")
+        for sheet_name, ok, detail in log:
+            print(f"  {'OK' if ok else 'SKIPPED'} {sheet_name}: {detail}")
+
+    elif args.mode == "notice":
+        out, log = build_debar_list(args.input, args.output, args.date, notice_board=True,
+                                     font_scale=args.font_scale, row_scale=args.row_scale)
         print(f"Saved: {out}")
         for sheet_name, ok, detail in log:
             print(f"  {'OK' if ok else 'SKIPPED'} {sheet_name}: {detail}")
