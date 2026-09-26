@@ -54,6 +54,8 @@ if "summaries" not in st.session_state:
     st.session_state.summaries = []
 if "debar_log" not in st.session_state:
     st.session_state.debar_log = []
+if "notice_log" not in st.session_state:
+    st.session_state.notice_log = []
 if "abstract_sems" not in st.session_state:
     st.session_state.abstract_sems = []
 if "log_lines" not in st.session_state:
@@ -146,6 +148,25 @@ with st.sidebar:
 
     st.header("4. Downstream reports")
     build_debar = st.checkbox("Build Tentative Debar List", value=True)
+    build_notice_board = st.checkbox(
+        "Build Notice Board copy of Debar List", value=True,
+        help="Same debar list, print-friendly for posting: no legend/signature "
+             "table, no per-subject footer summary row, bigger fonts and row "
+             "spacing. Requires 'Build Tentative Debar List' above.",
+    )
+    notice_font_scale, notice_row_scale = 1.6, 1.6
+    if build_notice_board:
+        nb_col1, nb_col2 = st.columns(2)
+        with nb_col1:
+            notice_font_scale = st.number_input(
+                "Notice board font scale", min_value=1.0, max_value=3.0,
+                value=1.6, step=0.1,
+            )
+        with nb_col2:
+            notice_row_scale = st.number_input(
+                "Notice board row-height scale", min_value=1.0, max_value=3.0,
+                value=1.6, step=0.1,
+            )
     build_abstract = st.checkbox(
         "Build Abstract Workbook", value=True,
         help="Requires a Lab Batch List upload above.",
@@ -164,6 +185,7 @@ if reset_clicked:
     st.session_state.results = {}
     st.session_state.summaries = []
     st.session_state.debar_log = []
+    st.session_state.notice_log = []
     st.session_state.abstract_sems = []
     st.session_state.log_lines = []
     st.rerun()
@@ -182,6 +204,7 @@ if run_clicked:
     st.session_state.results = {}
     st.session_state.summaries = []
     st.session_state.debar_log = []
+    st.session_state.notice_log = []
     st.session_state.abstract_sems = []
     st.session_state.log_lines = []
 
@@ -227,6 +250,22 @@ if run_clicked:
                     st.session_state.debar_log = d_log
                     st.write("✅ Debar List done")
 
+                    # 2b) Notice Board copy — same source, no legend/summary,
+                    # bigger fonts/rows. This is a separate call, not a
+                    # side effect of the one above, so it's skipped
+                    # cleanly if the checkbox is off.
+                    if build_notice_board:
+                        st.write("⏳ Building Notice Board copy of Debar List…")
+                        notice_output = os.path.join(WORKDIR, "Debar_List_NoticeBoard.xlsx")
+                        n_out, n_log = vp.build_debar_list(
+                            out_path, notice_output, as_of_date or None,
+                            notice_board=True,
+                            font_scale=notice_font_scale, row_scale=notice_row_scale,
+                        )
+                        st.session_state.results["Debar List (Notice Board)"] = n_out
+                        st.session_state.notice_log = n_log
+                        st.write("✅ Notice Board copy done")
+
                 # 3) Abstract
                 if build_abstract:
                     if not batch_path:
@@ -262,6 +301,11 @@ if st.session_state.results:
     if st.session_state.debar_log:
         with st.expander("Debar List — build log"):
             for sheet_name, ok, detail in st.session_state.debar_log:
+                st.write(("✅" if ok else "⏭️") + f" **{sheet_name}** — {detail}")
+
+    if st.session_state.notice_log:
+        with st.expander("Notice Board copy — build log"):
+            for sheet_name, ok, detail in st.session_state.notice_log:
                 st.write(("✅" if ok else "⏭️") + f" **{sheet_name}** — {detail}")
 
     if st.session_state.abstract_sems:
