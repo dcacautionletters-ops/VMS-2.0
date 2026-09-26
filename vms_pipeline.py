@@ -186,16 +186,42 @@ def load_raw(path, extra_ignore=None):
     return G, C
 
 
+def canon_section(s):
+    """Normalize a section string purely for MATCHING purposes — never
+    for anything actually displayed or written into a sheet.
+
+    The consolidated report's own Batch column and the Lab Batch List's
+    Batch column don't always spell the same section the same way — e.g.
+    the report says 'BCA AIML 2026 - A' but the Batch List says
+    'BCA AIML 2026 A' (no dash). Compared as plain strings those never
+    match, so the lab/faculty/batch cross-reference silently misses every
+    section spelled that way — this is exactly what used to make the
+    Batch List's batch numbers not apply to the BCA AIML / BCA DS
+    sections. canon_section() collapses dashes and extra whitespace and
+    uppercases, so both spellings map to the same key."""
+    return re.sub(r"[\s\-]+", " ", str(s).strip()).strip().upper()
+
+
 def series_of(batch):
-    """'CG 2025 A' -> 'CG 2025' — the series (branch+year) a section
-    belongs to, independent of the section letter."""
+    """'BCA 2025 A' -> 'BCA 2025'; 'BCA AIML 2026 - A' -> 'BCA AIML 2026'
+    — the series (full program/specialization stream + year) a section
+    belongs to, independent of the trailing section letter. Takes every
+    token up to and including the 4-digit year, so a specialization
+    stream like AIML or DS gets its OWN series instead of being folded
+    into the plain BCA series for the same year — 'BCA AIML 2026 - A'
+    and 'BCA 2026 A' must never be treated as the same GEN/GEN ALL
+    group just because they share a year."""
     parts = str(batch).strip().split()
     if not parts:
         return ""
-    yr = next((p for p in parts if re.fullmatch(r"\d{4}", p)), None)
-    if yr is None:
+    year_idx = next((i for i, p in enumerate(parts) if re.fullmatch(r"\d{4}", p)), None)
+    if year_idx is None:
+        # no clean 4-digit year token — fall back to first token + first
+        # numeric token (or 'X') so odd/legacy batch strings still
+        # produce *something* usable instead of misgrouping silently.
         yr = next((p for p in parts if p.isdigit()), "X")
-    return f"{parts[0]} {yr}"
+        return f"{parts[0]} {yr}"
+    return " ".join(parts[: year_idx + 1])
 
 
 def get_series(dept_rows, C):
@@ -204,9 +230,12 @@ def get_series(dept_rows, C):
 
 
 def series_df(dept_rows, ser, C):
-    parts = ser.strip().split()
-    k0, k1 = parts[0], parts[-1]
-    return [r for r in dept_rows if k0 in str(r[C["batch"]]) and k1 in str(r[C["batch"]])]
+    """Every row whose section belongs EXACTLY to series `ser` — matched
+    via series_of(), not a loose substring test (the old
+    'k0 in batch and k1 in batch' check would match "2026" appearing
+    anywhere in the string, which is how 'BCA AIML 2026 - A' used to leak
+    into the plain 'BCA 2026' series)."""
+    return [r for r in dept_rows if series_of(r[C["batch"]]) == ser]
 
 
 def get_subjects(rows, C, extra_ignore=None):
@@ -652,8 +681,8 @@ def build_faculty_maps(rows, C, batch_entries=None):
     """
     fac_key = C.get("faculty")
 
-    mapping = {}  # (section, subject) -> set of (batch_label, faculty) groups
-    entries = []  # (section, subject, roll, batch_label, faculty)
+    mapping = {}  # (canon section, subject) -> set of (batch_label, faculty) groups
+    entries = []  # (canon section, subject, roll, batch_label, faculty)
     if fac_key:
         for r in rows:
             subj = r.get(C["subject"])
@@ -669,20 +698,25 @@ def build_faculty_maps(rows, C, batch_entries=None):
             roll = str(roll).strip()
             if not (subj and fac and batch and roll):
                 continue
-            mapping.setdefault((batch, subj), set()).add((None, fac))
-            entries.append((batch, subj, roll, None, fac))
+            key_section = canon_section(batch)
+            mapping.setdefault((key_section, subj), set()).add((None, fac))
+            entries.append((key_section, subj, roll, None, fac))
 
     # Batch List cross-reference: authoritative for whatever (section,
     # subject) combinations it covers, fully replacing the report-derived
     # data for those keys. Each Batch List row already names its own
     # batch label, so the group is exactly (batch_label, faculty) — two
     # batches under the same faculty naturally become two groups.
-    batch_map = {}  # (section, subject, roll) -> (batch_label, faculty)
-    batch_subject_groups = {}  # (section, subject) -> set of (batch_label, faculty)
+    # canon_section() is applied here too so a Batch List section spelled
+    # differently from the report's own Batch column (e.g. no dash before
+    # the section letter) still lines up correctly.
+    batch_map = {}  # (canon section, subject, roll) -> (batch_label, faculty)
+    batch_subject_groups = {}  # (canon section, subject) -> set of (batch_label, faculty)
     if batch_entries:
         for section, subject, roll, batch_label, fac in batch_entries:
-            batch_map[(section, subject, roll)] = (batch_label, fac)
-            batch_subject_groups.setdefault((section, subject), set()).add((batch_label, fac))
+            key_section = canon_section(section)
+            batch_map[(key_section, subject, roll)] = (batch_label, fac)
+            batch_subject_groups.setdefault((key_section, subject), set()).add((batch_label, fac))
         for key, groups in batch_subject_groups.items():
             mapping[key] = set(groups)
 
@@ -748,14 +782,18 @@ def resolve_groups_for_sheet(sheet_title, subject, subject_groups):
     on the debar sheet `sheet_title`.
 
     - Section-specific sheets ('CG 2025 A'): direct (section, subject)
-      lookup — exactly the groups for that section.
+      lookup — exactly the groups for that section. `subject_groups` is
+      keyed by canon_section() (see its docstring), so `sheet_title` is
+      canon'd here before the lookup too — otherwise a report sheet
+      titled e.g. 'BCA AIML 2026 - A' would never match a Batch List
+      entry spelled 'BCA AIML 2026 A' (no dash).
     - Series-aggregate sheets ('CG 2025 GEN' / 'CG 2025 GEN ALL'): these
       span every section in the series, so every distinct group across
       those sections is unioned in — if two sections use two different
       faculty (or the same faculty on two different batches) for the same
       subject, all of them show up, not just one.
     """
-    direct = subject_groups.get((sheet_title, subject))
+    direct = subject_groups.get((canon_section(sheet_title), subject))
     if direct is not None:
         return list(direct)
 
@@ -766,10 +804,11 @@ def resolve_groups_for_sheet(sheet_title, subject, subject_groups):
             break
     else:
         return []  # not a GEN/GEN ALL sheet and no direct section match
+    base = canon_section(base)
 
     groups = set()
     for (section, subj), grp_list in subject_groups.items():
-        if subj == subject and series_of(section) == base:
+        if subj == subject and canon_section(series_of(section)) == base:
             groups.update(grp_list)
     return sorted(groups, key=group_sort_key)
 
@@ -870,6 +909,16 @@ DEBAR_LOGO_H = 563880 / 9525
 
 DEBAR_THIN = Side(style="thin")
 DEBAR_BORDER_ALL = Border(left=DEBAR_THIN, right=DEBAR_THIN, top=DEBAR_THIN, bottom=DEBAR_THIN)
+
+
+def excel_col_width_to_px(width):
+    """Excel's stored column width (in 'characters', the number you see in
+    the column-width dialog) to on-screen pixels — the standard Calibri-11
+    approximation Excel itself uses (7px per character plus 5px padding).
+    Only needs to be roughly right: used to keep the notice-board logo
+    from visually overflowing past the table's own right edge, not for
+    pixel-perfect layout."""
+    return round(width * 7 + 5)
 
 
 def _dfont(size, bold=False):
@@ -1078,6 +1127,7 @@ def _abstract_section_rows(section, subject_rows, C, batch_map):
     label needed."""
     subjects = get_subjects(subject_rows, C)
     out_rows = []
+    key_section = canon_section(section)  # batch_map is keyed by canon_section() — see its docstring
     for subj in subjects:
         srows = [r for r in subject_rows if r[C["subject"]] == subj]
         by_group = {}  # (batch_label, faculty) -> [6 bucket counts]
@@ -1086,7 +1136,7 @@ def _abstract_section_rows(section, subject_rows, C, batch_map):
             roll = str(r.get(C["roll"]) or "").strip()
             pct = r.get(C["attendance"])
             bidx = bucket_index(pct)
-            entry = batch_map.get((section, subj, roll))
+            entry = batch_map.get((key_section, subj, roll))
             if entry:
                 batch_label, fac = entry
             else:
@@ -1227,19 +1277,24 @@ def build_abstract(input_path, batch_list_path, output_path, date_str=None, prog
         raise ValueError("No usable rows found in the Batch List workbook — check its column headers match "
                           "'Reg No.', 'Batch', 'Course Community Name', 'Faculty'.")
 
+    # canon_section() so a Batch List section spelled without the dash
+    # ('BCA AIML 2026 A') still matches the report's own spelling
+    # ('BCA AIML 2026 - A') — see canon_section()'s docstring. batch_map
+    # is looked up the same way inside _abstract_section_rows().
     batch_map = {}
     covered_sections = set()
     for section, subject, roll, batch_label, fac in batch_entries:
-        batch_map[(section, subject, roll)] = (batch_label, fac)
-        covered_sections.add(section)
+        key_section = canon_section(section)
+        batch_map[(key_section, subject, roll)] = (batch_label, fac)
+        covered_sections.add(key_section)
 
     section_sem = {}
     for r in G:
         sec = str(r.get(C["batch"]) or "").strip().replace("/", "-")
-        if sec in covered_sections and sec not in section_sem:
+        if canon_section(sec) in covered_sections and sec not in section_sem:
             section_sem[sec] = str(r.get(C["sem"]) or "").strip()
 
-    missing = covered_sections - set(section_sem)
+    missing = covered_sections - {canon_section(s) for s in section_sem}
     if missing:
         print(f"  (note: {len(missing)} Batch List section(s) not found in the consolidated report, skipped: {sorted(missing)})")
 
@@ -1275,17 +1330,22 @@ def build_debar_list(input_path, output_path, date_str=None, notice_board=False,
     Subject Teacher / Class Teacher / HOD signature lines.
 
     notice_board=True builds a print-friendly variant meant for posting on
-    a physical notice board instead of internal/faculty use: the SUBJECT /
-    FACULTY IN CHARGE / NO of students / Plan of Action / Signature legend
-    table and the per-subject shortage-count footer row are both left out
-    (that information isn't useful to a student reading the board), every
-    font is scaled up by `font_scale` and every row height by `row_scale`
-    for legibility from a distance, and the Class Teacher / HOD / Principal
-    signature line moves up to sit just below the student data instead of
-    below the legend. Page setup is unchanged either way — one page wide
-    (fitToWidth=1), with as many pages tall as needed (fitToHeight=0) so a
-    section with more students having a shortage simply flows onto more
-    printed pages rather than being squeezed to fit.
+    a physical notice board instead of internal/faculty use: the trailing
+    Student Signature column, the SUBJECT / FACULTY IN CHARGE / NO of
+    students / Plan of Action / Signature legend table, the per-subject
+    shortage-count footer row, and the Class Teacher / HOD / Principal
+    signature line are all left out entirely (none of that is useful to a
+    student reading the board) — the sheet ends right after the student
+    data. Every font is scaled up by `font_scale` and every row height by
+    `row_scale` for legibility from a distance; the Sl No / Roll No /
+    Student Name columns are widened by the same factor so they don't
+    look cramped at the bigger font size, and the college logo is
+    enlarged by the row-height factor. No font is ever scaled DOWN to
+    help the page fit — including the heading — page-fit is handled
+    purely by print scaling (fitToWidth=1, fitToHeight=0 below), so a
+    section with more students simply flows onto more printed pages
+    landscape rather than the heading or data being shrunk to squeeze
+    onto one page.
     """
     if date_str is None:
         date_str = time.strftime("%d.%m.%Y")
@@ -1353,30 +1413,61 @@ def build_debar_list(input_path, output_path, date_str=None, notice_board=False,
             # -> 0-based slice(5, idx_theory)
             subject_headers = headers[5:idx_theory]
             n_subjects = len(subject_headers)
-            n_cols = 3 + n_subjects + 2 + 1  # +1 for the trailing Student Signature column
+            # Notice-board copies drop the trailing Student Signature
+            # column entirely — nobody signs a sheet pinned to a board —
+            # so n_cols has no +1 for it in that case.
+            n_cols = 3 + n_subjects + 2 + (0 if notice_board else 1)
             final_avg_col = 3 + n_subjects + 1
             shortage_col = 3 + n_subjects + 2
-            signature_col = 3 + n_subjects + 3
+            signature_col = None if notice_board else 3 + n_subjects + 3
             last_col_letter = get_column_letter(n_cols)
 
             name = sws.title[:31]
             ows = out.create_sheet(name)
 
-            ows.column_dimensions["A"].width = DEBAR_COL_A_W
-            ows.column_dimensions["B"].width = DEBAR_COL_B_W
-            ows.column_dimensions["C"].width = DEBAR_COL_C_W
+            # Sl No / Roll No / Student Name columns are widened for the
+            # notice-board copy (same scale as the enlarged font) so they
+            # stay clearly readable rather than cramped/truncated at the
+            # bigger font size.
+            col_scale = font_scale if notice_board else 1.0
+            ows.column_dimensions["A"].width = DEBAR_COL_A_W * col_scale
+            ows.column_dimensions["B"].width = DEBAR_COL_B_W * col_scale
+            ows.column_dimensions["C"].width = DEBAR_COL_C_W * col_scale
             for c in range(4, n_cols + 1):
                 ows.column_dimensions[get_column_letter(c)].width = DEBAR_COL_SUBJ_W
-            ows.column_dimensions[get_column_letter(signature_col)].width = DEBAR_COL_SIG_W
+            if signature_col is not None:
+                ows.column_dimensions[get_column_letter(signature_col)].width = DEBAR_COL_SIG_W
 
-            # Row 1: logo
-            ows.row_dimensions[1].height = DEBAR_ROW1_H
+            # Row 1: logo — "dragged" bigger for the notice-board copy
+            # (same enlargement factor as the row heights) so it's easy
+            # to spot from a distance on a physical board — but never
+            # wider than the table itself: for sheets with fewer subject
+            # columns (e.g. a GEN sheet), the enlarged logo could
+            # otherwise overhang past the table's right edge, so its
+            # width is capped to the table's total column width (aspect
+            # ratio preserved, so it's never stretched/squashed either).
+            logo_scale = row_scale if notice_board else 1.0
+            ows.row_dimensions[1].height = DEBAR_ROW1_H * logo_scale
             if os.path.exists(LOGO_PATH):
                 img = XLImage(LOGO_PATH)
-                img.width, img.height = DEBAR_LOGO_W, DEBAR_LOGO_H
+                logo_w, logo_h = DEBAR_LOGO_W * logo_scale, DEBAR_LOGO_H * logo_scale
+                if notice_board:
+                    table_width_px = sum(
+                        excel_col_width_to_px(ows.column_dimensions[get_column_letter(c)].width)
+                        for c in range(1, n_cols + 1)
+                    )
+                    if logo_w > table_width_px:
+                        shrink = table_width_px / logo_w
+                        logo_w, logo_h = logo_w * shrink, logo_h * shrink
+                img.width, img.height = logo_w, logo_h
                 ows.add_image(img, "A1")
 
-            # Row 2: title
+            # Row 2: title — font size for this row comes from build_debar_style()
+            # via `styles["title"]`, which for the notice-board copy is
+            # SCALED UP by font_scale (never reduced) along with every
+            # other font on the sheet, and is never separately shrunk to
+            # help the page fit — page-fit is handled entirely by
+            # fitToWidth/fitToHeight below, not by touching font sizes.
             ows.row_dimensions[2].height = row2_h
             ows.merge_cells(f"A2:{last_col_letter}2")
             title_cell = ows.cell(row=2, column=1)
@@ -1389,7 +1480,8 @@ def build_debar_list(input_path, output_path, date_str=None, notice_board=False,
             # Row 3: header
             ows.row_dimensions[3].height = row3_h
             header_values = ["Sl No.", "Roll No.", "Student Name"] + list(subject_headers) + \
-                             ["Final Avg", "No of subjects having Shortage", "Student Signature"]
+                             ["Final Avg", "No of subjects having Shortage"] + \
+                             ([] if notice_board else ["Student Signature"])
             for i, val in enumerate(header_values):
                 c = i + 1
                 cell = ows.cell(row=3, column=c)
@@ -1424,12 +1516,13 @@ def build_debar_list(input_path, output_path, date_str=None, notice_board=False,
                     _dapply(cell, "dataSubject", styles)
                     if v not in (None, ""):
                         counts[i] += 1
-                        grp = student_group.get((row_section, str(subject_headers[i]).strip(), str(roll).strip()))
+                        grp = student_group.get((canon_section(row_section), str(subject_headers[i]).strip(), str(roll).strip()))
                         if grp and grp[1]:
                             multi_group_counts[i][grp] += 1
                 cf = ows.cell(row=row_out, column=final_avg_col, value=final_avg); _dapply(cf, "dataSubject", styles)
                 cs = ows.cell(row=row_out, column=shortage_col, value=shortage_n); _dapply(cs, "dataSubjectBold", styles)
-                csig = ows.cell(row=row_out, column=signature_col); _dapply(csig, "dataSubject", styles)  # left blank for the student to sign
+                if signature_col is not None:
+                    csig = ows.cell(row=row_out, column=signature_col); _dapply(csig, "dataSubject", styles)  # left blank for the student to sign
                 row_out += 1
 
             last_data_row = row_out - 1
@@ -1478,18 +1571,17 @@ def build_debar_list(input_path, output_path, date_str=None, notice_board=False,
                 legend_start = footer_row + 3
                 last_legend_row = _write_debar_legend(ows, legend_start, legend_entries)
                 sig_row2 = last_legend_row + 6
-            else:
-                # Notice-board copy: no footer counts, no legend — the
-                # signature line sits a few rows below the student data.
-                sig_row2 = last_data_row + 4
 
-            # Class Teacher / HOD / Principal signature line
-            class_cell = ows.cell(row=sig_row2, column=LEGEND_SUBJECT_START, value="Class Teacher Signature")
-            _dapply(class_cell, "sigClass", styles)
-            hod_cell = ows.cell(row=sig_row2, column=LEGEND_COUNT_START, value="HOD")
-            _dapply(hod_cell, "sigHod", styles)
-            principal_cell = ows.cell(row=sig_row2, column=LEGEND_PLAN_START, value="PRINCIPAL")
-            _dapply(principal_cell, "sigHod", styles)
+                # Class Teacher / HOD / Principal signature line — internal/
+                # faculty copy only. Left out of the notice-board copy
+                # entirely per request: nothing below the student data
+                # except what's already there.
+                class_cell = ows.cell(row=sig_row2, column=LEGEND_SUBJECT_START, value="Class Teacher Signature")
+                _dapply(class_cell, "sigClass", styles)
+                hod_cell = ows.cell(row=sig_row2, column=LEGEND_COUNT_START, value="HOD")
+                _dapply(hod_cell, "sigHod", styles)
+                principal_cell = ows.cell(row=sig_row2, column=LEGEND_PLAN_START, value="PRINCIPAL")
+                _dapply(principal_cell, "sigHod", styles)
 
             ows.sheet_view.showGridLines = False
             ows.page_setup.orientation = "landscape"
@@ -1789,8 +1881,8 @@ def main():
     # Omit both flags to be prompted (y/N) at runtime instead.
 
     p_download = sub.add_parser("download", help="Only download the raw report from Linways")
-    p_download.add_argument("--username", default="xxxxxxxx.admin@presidency.edu.in")
-    p_download.add_argument("--password", default="XXXX@143")
+    p_download.add_argument("--username", default="XXXXXXX@presidency.edu.in")
+    p_download.add_argument("--password", default="XXX@143")
     p_download.add_argument("--show-browser", action="store_true")
     p_download.add_argument("--from-date", default=None, help="Start of date range for the Linways report (format must match the real field once selectors are confirmed)")
     p_download.add_argument("--to-date", default=None, help="End of date range for the Linways report")
