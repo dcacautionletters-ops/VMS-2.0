@@ -1789,8 +1789,8 @@ def main():
     # Omit both flags to be prompted (y/N) at runtime instead.
 
     p_download = sub.add_parser("download", help="Only download the raw report from Linways")
-    p_download.add_argument("--username", default="vishwanath.admin@presidency.edu.in")
-    p_download.add_argument("--password", default="Gagan@143")
+    p_download.add_argument("--username", default="xxxxxxxx.admin@presidency.edu.in")
+    p_download.add_argument("--password", default="XXXX@143")
     p_download.add_argument("--show-browser", action="store_true")
     p_download.add_argument("--from-date", default=None, help="Start of date range for the Linways report (format must match the real field once selectors are confirmed)")
     p_download.add_argument("--to-date", default=None, help="End of date range for the Linways report")
