@@ -1272,6 +1272,8 @@ def build_abstract(input_path, batch_list_path, output_path, date_str=None, prog
         date_str = time.strftime("%d.%m.%Y")
     output_path = in_subfolder(output_path, "Abstract Report")
     G, C = load_raw(input_path)
+  +   # Abstract never includes Soft Skill, regardless of the main report's setting
++   G, C = load_raw(input_path, [SOFT_SKILL_KEYWORD])
     batch_entries = load_batch_list(batch_list_path)
     if not batch_entries:
         raise ValueError("No usable rows found in the Batch List workbook — check its column headers match "
