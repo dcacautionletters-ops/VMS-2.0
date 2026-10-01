@@ -35,6 +35,9 @@ Download from Linways AND format in one go (after filling in selectors):
 
 Only download the raw file (no formatting):
     python vms_pipeline.py download --username YOU --password PASS --from-date 01/06/2026 --to-date 31/07/2026
+
+NOTE: the Abstract workbook NEVER includes Soft Skill, regardless of the
+Soft Skill choice made for the main VMS report / debar lists.
 """
 import argparse
 import glob
@@ -100,6 +103,10 @@ HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
 PLAIN_FONT = Font(size=11)
 THIN = Side(style="thin", color="4D4D4D")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+# Subjects containing this keyword (case-insensitive) are dropped when
+# Soft Skill is excluded. Defined up here so every builder can use it.
+SOFT_SKILL_KEYWORD = "SOFT SKILL"
 
 
 def is_valid(subject, extra_ignore=None):
@@ -622,8 +629,6 @@ def apply_subject_filters(rows, C, exclude=None, include=None):
         out = [r for r in out if r[C["subject"]] not in exclude]
     return out
 
-
-SOFT_SKILL_KEYWORD = "SOFT SKILL"
 
 # Hidden sheets used to carry faculty/group info from the VMS Report
 # workbook through to the debar-list legend.
@@ -1267,13 +1272,15 @@ def build_abstract(input_path, batch_list_path, output_path, date_str=None, prog
     theory subjects use the consolidated report's own Staff Name column.
     Each sheet gets the Presidency logo and a heading like "I SEM BCA
     ABSTRACT AS OF <date>" at the top.
+
+    Soft Skill is ALWAYS excluded from the abstract, regardless of the
+    Soft Skill choice made for the main VMS report.
     """
     if date_str is None:
         date_str = time.strftime("%d.%m.%Y")
     output_path = in_subfolder(output_path, "Abstract Report")
-    G, C = load_raw(input_path)
-  +   # Abstract never includes Soft Skill, regardless of the main report's setting
-+   G, C = load_raw(input_path, [SOFT_SKILL_KEYWORD])
+    # Soft Skill is never part of the abstract.
+    G, C = load_raw(input_path, [SOFT_SKILL_KEYWORD])
     batch_entries = load_batch_list(batch_list_path)
     if not batch_entries:
         raise ValueError("No usable rows found in the Batch List workbook — check its column headers match "
@@ -1849,7 +1856,7 @@ def run_downstream_reports(vms_report_path, raw_path, args):
     if args.batch_list and not args.skip_abstract:
         abstract_output = args.abstract_output or f"{base}_Abstract.xlsx"
         aout, sems = build_abstract(raw_path, args.batch_list, abstract_output, args.date, args.program)
-        print(f"Abstract workbook saved: {aout}")
+        print(f"Abstract workbook saved (Soft Skill excluded): {aout}")
         for s in sems:
             print(f"  Sheet: SUB {sem_label(s)} SEM")
     elif not args.batch_list:
@@ -1883,8 +1890,8 @@ def main():
     # Omit both flags to be prompted (y/N) at runtime instead.
 
     p_download = sub.add_parser("download", help="Only download the raw report from Linways")
-    p_download.add_argument("--username", default="XXXXXXX@presidency.edu.in")
-    p_download.add_argument("--password", default="XXX@143")
+    p_download.add_argument("--username", default=os.environ.get("LINWAYS_USERNAME", ""))
+    p_download.add_argument("--password", default=os.environ.get("LINWAYS_PASSWORD", ""))
     p_download.add_argument("--show-browser", action="store_true")
     p_download.add_argument("--from-date", default=None, help="Start of date range for the Linways report (format must match the real field once selectors are confirmed)")
     p_download.add_argument("--to-date", default=None, help="End of date range for the Linways report")
@@ -1901,7 +1908,7 @@ def main():
     p_notice.add_argument("--font-scale", type=float, default=1.6, help="Font-size multiplier vs the normal debar list (default 1.6)")
     p_notice.add_argument("--row-scale", type=float, default=1.6, help="Row-height multiplier vs the normal debar list (default 1.6)")
 
-    p_abstract = sub.add_parser("abstract", help="Build the per-semester Abstract workbook from a raw consolidated report + Lab Batch List")
+    p_abstract = sub.add_parser("abstract", help="Build the per-semester Abstract workbook (Soft Skill excluded) from a raw consolidated report + Lab Batch List")
     p_abstract.add_argument("input", help="Raw consolidated attendance report")
     p_abstract.add_argument("batch_list", help="BCA/MCA Lab Batch List workbook")
     p_abstract.add_argument("output")
@@ -1909,8 +1916,8 @@ def main():
     p_abstract.add_argument("--program", default="BCA", help="Program name shown in the abstract workbook heading, e.g. 'BCA' or 'MCA'")
 
     p_pipeline = sub.add_parser("pipeline", help="Download from Linways, format, build the debar list, and (with --batch-list) the abstract workbook — all in one go")
-    p_pipeline.add_argument("--username", default=os.environ.get("LINWAYS_USERNAME", "vishwanath.admin@presidency.edu.in"))
-    p_pipeline.add_argument("--password", default=os.environ.get("LINWAYS_PASSWORD", "Gagan@143"))
+    p_pipeline.add_argument("--username", default=os.environ.get("LINWAYS_USERNAME", ""))
+    p_pipeline.add_argument("--password", default=os.environ.get("LINWAYS_PASSWORD", ""))
     p_pipeline.add_argument("--output", default="VMS_Report.xlsx")
     p_pipeline.add_argument("--low", type=float, default=None, help="Omit to be prompted at runtime")
     p_pipeline.add_argument("--high", type=float, default=None, help="Omit to be prompted at runtime")
